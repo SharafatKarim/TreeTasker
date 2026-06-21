@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tree Tasker · Process Ancestry</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg0:#0b1020; --bg1:#141a30; --ink:#e8ecf6; --muted:#8a94b3;
+    --accent:#5eead4; --accent2:#7c9cff; --hot:#ff6b6b; --line:#2a3354;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; font-family:"Inter",system-ui,Segoe UI,Roboto,sans-serif;
+              color:var(--ink); background:radial-gradient(1200px 800px at 70% -10%, #1b2b55 0, transparent 60%),
+              linear-gradient(160deg,var(--bg0),var(--bg1)); overflow:hidden; }
+  header {
+    position:fixed; top:0; left:0; right:0; z-index:10; display:flex; align-items:center;
+    gap:16px; padding:12px 20px; backdrop-filter:blur(10px);
+    background:linear-gradient(180deg, rgba(11,16,32,.85), rgba(11,16,32,.35));
+    border-bottom:1px solid var(--line);
+  }
+  .brand { font-weight:700; letter-spacing:.3px; font-size:18px; }
+  .brand small { color:var(--muted); font-weight:500; margin-left:8px; font-size:12px; }
+  .grow { flex:1; }
+  .pill { background:rgba(255,255,255,.05); border:1px solid var(--line); color:var(--muted);
+          padding:6px 12px; border-radius:999px; font-size:12px; }
+  .pill b { color:var(--ink); }
+  input[type=search] {
+    background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--ink);
+    padding:8px 12px; border-radius:10px; outline:none; width:220px; font-size:13px;
+  }
+  input[type=search]:focus { border-color:var(--accent2); }
+  button, label.toggle {
+    background:rgba(124,156,255,.15); border:1px solid var(--accent2); color:var(--ink);
+    padding:8px 12px; border-radius:10px; cursor:pointer; font-size:13px; user-select:none;
+  }
+  button:hover { background:rgba(124,156,255,.3); }
+  label.toggle input { vertical-align:middle; margin-right:6px; }
+  svg { width:100vw; height:100vh; display:block; cursor:grab; }
+  svg:active { cursor:grabbing; }
+
+  .link { fill:none; stroke:var(--line); stroke-width:1.4px; }
+  .node circle { stroke-width:2px; cursor:pointer; transition:r .15s ease; }
+  .node text { font-size:12px; fill:var(--ink); paint-order:stroke;
+               stroke:rgba(11,16,32,.85); stroke-width:3px; pointer-events:none; }
+  .node .pid { fill:var(--muted); font-size:10px; }
+  .node.collapsed circle { stroke-dasharray:2 2; }
+  .lineage .link { stroke:var(--accent); stroke-width:2.4px; }
+  .lineage circle { filter:drop-shadow(0 0 6px var(--accent)); }
+  .match circle { stroke:var(--accent) !important; }
+  .dim { opacity:.18; }
+
+  #tip {
+    position:fixed; pointer-events:none; z-index:20; opacity:0; transition:opacity .12s;
+    background:rgba(10,14,28,.96); border:1px solid var(--line); border-radius:12px;
+    padding:10px 12px; font-size:12px; min-width:180px; box-shadow:0 12px 40px rgba(0,0,0,.5);
+  }
+  #tip h4 { margin:0 0 6px; font-size:13px; }
+  #tip .row { display:flex; justify-content:space-between; gap:18px; color:var(--muted); }
+  #tip .row b { color:var(--ink); font-weight:600; }
+  #tip .bar { height:5px; border-radius:3px; margin-top:3px; background:rgba(255,255,255,.08); overflow:hidden;}
+  #tip .bar > i { display:block; height:100%; }
+  .hint { position:fixed; bottom:14px; left:20px; color:var(--muted); font-size:12px; z-index:5; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">🌳 Tree Tasker <small>live process ancestry</small></div>
+    <span class="pill" id="stat">…</span>
+    <div class="grow"></div>
+    <input id="search" type="search" placeholder="Search by name or PID…" />
+    <label class="toggle"><input type="checkbox" id="auto" checked />Auto-refresh</label>
+    <button id="refresh">Refresh</button>
+    <button id="reset">Fit</button>
+  </header>
+
+  <svg id="canvas"></svg>
+  <div id="tip"></div>
+  <div class="hint">Click a node to fold/unfold its descendants · hover for details · scroll to zoom · drag to pan</div>
+
+<script>
+const svg = d3.select("#canvas");
+const gZoom = svg.append("g");           // pans/zooms
+const gLink = gZoom.append("g");
+const gNode = gZoom.append("g");
+const tip = d3.select("#tip");
+
+const DX = 22;    // vertical spacing between sibling rows
+const DY = 220;   // horizontal spacing between depth levels
+
+// Persisted UI state that must survive a data refresh:
+const collapsed = new Set();   // pids the user (or initial layout) has folded
+let selectedPid = null;        // node whose lineage is highlighted
+let firstLoad = true;
+
+const zoom = d3.zoom().scaleExtent([0.15, 2.5])
+  .on("zoom", e => gZoom.attr("transform", e.transform));
+svg.call(zoom);
+
+// Colour by depth, with a warm tint for CPU-hungry processes.
+const depthColor = d3.scaleOrdinal(d3.quantize(d3.interpolateCool, 8));
+function nodeFill(d) {
+  if (d.data.cpu >= 15) return "#ff7a7a";
+  return depthColor(d.depth % 8);
+}
+
+function ageString(started, now) {
+  if (!started) return "—";
+  let s = Math.max(0, now - started);
+  const d = Math.floor(s/86400); s -= d*86400;
+  const h = Math.floor(s/3600);  s -= h*3600;
+  const m = Math.floor(s/60);    s = Math.floor(s - m*60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+let serverNow = Date.now()/1000;
+
+async function load() {
+  const res = await fetch("/api/tree");
+  const payload = await res.json();
+  serverNow = payload.now;
+  d3.select("#stat").html(`<b>${payload.tree.count}</b> processes`);
+
+  const root = d3.hierarchy(payload.tree, d => d.children);
+
+  // The tree starts fully expanded; the user folds nodes from there and the
+  // collapsed-set below remembers those choices across refreshes.
+  // Only the very first load auto-fits; later refreshes must keep the
+  // user's current zoom/pan instead of snapping back to the fitted view.
+  const shouldFit = firstLoad;
+  firstLoad = false;
+
+  // Apply the persisted collapsed-set: move folded children to `_children`.
+  root.each(n => {
+    if (collapsed.has(n.data.pid) && n.children) {
+      n._children = n.children;
+      n.children = null;
+    }
+  });
+
+  render(root);
+  if (shouldFit) fit(root);
+}
+
+function toggle(n) {
+  if (n.children) { collapsed.add(n.data.pid); }
+  else if (n._children) { collapsed.delete(n.data.pid); }
+  load();   // reload keeps data fresh and re-applies the updated collapsed-set
+}
+
+function render(root) {
+  d3.tree().nodeSize([DX, DY])(root);
+
+  const nodes = root.descendants();
+  const links = root.links();
+
+  // Vertical extent, used by fit().
+  let minX = Infinity, maxX = -Infinity;
+  nodes.forEach(d => { minX = Math.min(minX, d.x); maxX = Math.max(maxX, d.x); });
+  root._extent = {minX, maxX};
+
+  const linkGen = d3.linkHorizontal().x(d => d.y).y(d => d.x);
+
+  // ---- links ----
+  gLink.selectAll("path").data(links, d => d.target.data.pid)
+    .join(
+      enter => enter.append("path").attr("class","link").attr("d", linkGen),
+      update => update.attr("d", linkGen),
+      exit => exit.remove()
+    );
+
+  // ---- nodes ----
+  const node = gNode.selectAll("g.node").data(nodes, d => d.data.pid)
+    .join(
+      enter => {
+        const g = enter.append("g").attr("class","node")
+          .attr("transform", d => `translate(${d.y},${d.x})`);
+        g.append("circle");
+        g.append("text").attr("class","name").attr("dy","-.4em").attr("x", 10);
+        g.append("text").attr("class","pid").attr("dy",".9em").attr("x", 10);
+        return g;
+      },
+      update => update.attr("transform", d => `translate(${d.y},${d.x})`),
+      exit => exit.remove()
+    );
+
+  node.classed("collapsed", d => !!d._children)
+      .on("click", (e,d) => { e.stopPropagation(); selectedPid = d.data.pid; toggle(d); })
+      .on("mouseenter", (e,d) => showTip(e,d,root))
+      .on("mousemove", moveTip)
+      .on("mouseleave", hideTip);
+
+  node.select("circle")
+      .attr("r", d => d.data.pid === 0 ? 7 : (d._children ? 6.5 : 5))
+      .attr("fill", nodeFill)
+      .attr("stroke", d => d._children ? "#fff" : "rgba(255,255,255,.55)");
+
+  node.select("text.name").text(d => d.data.name);
+  node.select("text.pid").text(d => d.data.pid ? `pid ${d.data.pid} · ${d.data.cpu}% cpu` : "");
+
+  highlightLineage(root);
+  applySearch();
+}
+
+// ---- lineage highlight (the "ancestry" story) ----
+function highlightLineage(root) {
+  gNode.selectAll("g.node").classed("lineage", false);
+  gLink.selectAll("path").classed("lineage", false);
+  if (selectedPid == null) return;
+  const target = root.descendants().find(d => d.data.pid === selectedPid);
+  if (!target) return;
+  const chain = new Set(target.ancestors().map(d => d.data.pid));
+  gNode.selectAll("g.node").classed("lineage", d => chain.has(d.data.pid));
+  gLink.selectAll("path").classed("lineage", d => chain.has(d.target.data.pid) && chain.has(d.source.data.pid));
+}
+
+// ---- tooltip ----
+function showTip(e,d,root) {
+  if (d.data.pid === 0) { return hideTip(); }
+  const parent = d.parent ? d.parent.data.name : "—";
+  const cpuW = Math.min(100, d.data.cpu);
+  const memW = Math.min(100, d.data.mem);
+  tip.html(`
+    <h4>${escapeHtml(d.data.name)}</h4>
+    <div class="row"><span>PID</span><b>${d.data.pid}</b></div>
+    <div class="row"><span>Parent</span><b>${escapeHtml(parent)} (${d.parent?d.parent.data.pid:"—"})</b></div>
+    <div class="row"><span>User</span><b>${escapeHtml(d.data.user||"—")}</b></div>
+    <div class="row"><span>Age</span><b>${ageString(d.data.started, serverNow)}</b></div>
+    <div class="row"><span>CPU</span><b>${d.data.cpu}%</b></div>
+    <div class="bar"><i style="width:${cpuW}%;background:var(--hot)"></i></div>
+    <div class="row" style="margin-top:6px"><span>Memory</span><b>${d.data.mem}%</b></div>
+    <div class="bar"><i style="width:${memW}%;background:var(--accent2)"></i></div>
+    <div class="row" style="margin-top:6px"><span>Descendants</span><b>${(d.descendants().length-1)+( d._children?countHidden(d):0)}</b></div>
+  `);
+  tip.style("opacity",1);
+  moveTip(e);
+}
+function countHidden(d){ let n=0; (function w(x){ (x.children||x._children||[]).forEach(c=>{n++;w(c);});})(d); return n; }
+function moveTip(e){
+  const pad=14, w=210;
+  let x=e.clientX+pad, y=e.clientY+pad;
+  if (x+w>window.innerWidth) x=e.clientX-w-pad;
+  tip.style("left",x+"px").style("top",y+"px");
+}
+function hideTip(){ tip.style("opacity",0); }
+
+// ---- search ----
+function applySearch() {
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  const all = gNode.selectAll("g.node");
+  if (!q) { all.classed("match",false).classed("dim",false); return; }
+  all.classed("match", d => matches(d,q)).classed("dim", d => !matches(d,q));
+}
+function matches(d,q){ return d.data.name.toLowerCase().includes(q) || String(d.data.pid).includes(q); }
+
+// ---- fit-to-screen ----
+function fit(root){
+  const ext = root._extent || {minX:0,maxX:0};
+  const maxDepth = d3.max(root.descendants(), d => d.depth) || 1;
+  const w = window.innerWidth, h = window.innerHeight;
+  const treeW = (maxDepth+1)*DY, treeH = (ext.maxX-ext.minX)+80;
+  const k = Math.min(0.9, (w-80)/treeW, (h-140)/treeH);
+  const tx = 60;
+  const ty = (h/2) - ((ext.minX+ext.maxX)/2)*k;
+  svg.transition().duration(450).call(zoom.transform,
+      d3.zoomIdentity.translate(tx,ty).scale(k));
+}
+
+function escapeHtml(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---- wiring ----
+svg.on("click", () => { selectedPid = null; gNode.selectAll("g.node").classed("lineage",false); gLink.selectAll("path").classed("lineage",false); });
+document.getElementById("refresh").onclick = () => load();
+document.getElementById("reset").onclick   = () => load().then(()=>{});
+document.getElementById("search").oninput  = applySearch;
+
+let timer = null;
+function setAuto(on){ clearInterval(timer); if(on) timer=setInterval(()=>{ if(!document.hidden) load(); }, 3000); }
+document.getElementById("auto").onchange = e => setAuto(e.target.checked);
+
+// "Fit" button: re-center on the current tree.
+document.getElementById("reset").onclick = () => {
+  const root = lastRoot; if (root) fit(root);
+};
+
+// keep a handle to the latest root for the Fit button
+let lastRoot = null;
+const _render = render;
+render = function(r){ lastRoot = r; _render(r); };
+
+load().then(()=> setAuto(true));
+</script>
+</body>
+</html>

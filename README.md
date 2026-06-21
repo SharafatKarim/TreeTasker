@@ -10,8 +10,6 @@ data source):
 | **Desktop** (`main.py`) | PySide6 (Qt) + QtCharts | A native task-manager window with a live process tree and a resource-usage pie chart. |
 | **Web** (`webapp.py`) | Flask + D3.js | A browser-based, animated, collapsible process-ancestry tree you can pan, zoom and search. |
 
----
-
 ## Features
 
 ### Desktop app (`main.py`)
@@ -36,8 +34,6 @@ data source):
   intact (only the first load auto-fits the view).
 - CPU-hungry processes (≥ 15 %) are tinted warm so they stand out.
 
----
-
 ## Requirements
 
 - **Python ≥ 3.12**
@@ -49,13 +45,11 @@ data source):
 This project uses [**uv**](https://docs.astral.sh/uv/) for dependency and
 environment management.
 
----
-
 ## Installation
 
 ```bash
 # Clone the repository, then enter it
-git clone <repository-url>
+git clone https://github.com/SharafatKarim/TreeTasker
 cd tree_tasker
 
 # Install dependencies into a managed virtual environment
@@ -69,8 +63,6 @@ uv sync
 > python -m venv .venv && source .venv/bin/activate
 > pip install "flask>=3.1.3" "psutil>=7.2.2" "pyside6>=6.11.1"
 > ```
-
----
 
 ## Usage
 
@@ -88,7 +80,7 @@ A native window opens with the **Process Tree** and **Resource Usage** tabs.
 uv run webapp.py
 ```
 
-Then open <http://127.0.0.1:5000> in your browser.
+Then open <http://0.0.0.0:5000> in your browser.
 
 | Action | How |
 | --- | --- |
@@ -99,8 +91,6 @@ Then open <http://127.0.0.1:5000> in your browser.
 | Search | Type a name or PID in the search box |
 | Re-center | Click **Fit** |
 | Toggle live updates | **Auto-refresh** checkbox |
-
----
 
 ## How it works
 
@@ -123,8 +113,6 @@ The web backend exposes a single JSON endpoint:
 | `GET /` | Serves the D3.js front end (`templates/index.html`). |
 | `GET /api/tree` | Returns the live ancestry tree plus a server timestamp. |
 
----
-
 ## Project structure
 
 ```
@@ -137,17 +125,9 @@ tree_tasker/
 └── README.md
 ```
 
----
-
 ## Notes & limitations
 
 - Some metrics (per-process disk IO, connection counts) require elevated
   privileges; without them those values fall back to `0`.
-- The web app binds to `127.0.0.1` only — it is intended for local use, not as a
   public service.
 
----
-
-## License
-
-No license has been specified yet. Add one (e.g. MIT) before distributing.
